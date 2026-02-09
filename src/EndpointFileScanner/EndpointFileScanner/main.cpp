@@ -1,21 +1,18 @@
 ﻿// EndpointFileScanner.cpp : 이 파일에는 'main' 함수가 포함됩니다. 거기서 프로그램 실행이 시작되고 종료됩니다.
 //
 
-//-  v0.2
 #include <iostream>
 #include <string>
 #include <filesystem>
 #include <system_error>
-//-  v0.4
 #include <vector>
-#include <cctype> 
+#include <cctype>
 
-//-  v0.2
 namespace fs = std::filesystem;
 using std::cout;
 using std::endl;
 
-//-  v0.4
+//파일의 상세정보 기록
 struct FileEntry
 {
     fs::path path;
@@ -24,141 +21,172 @@ struct FileEntry
     fs::file_time_type mtime;
 };
 
-//-  v0.4
+//파일의 전체합계/통계 저장
+struct Stats
+{
+    std::size_t total = 0; //총 스캔항목수
+    std::size_t files = 0;//파일로 판정된 항목수
+    std::size_t skipped = 0;//제외된 항목수
+      
+    std::size_t data_ok = 0;//데이터수집이 완료된 항목수
+    std::size_t data_fail = 0;//데이터수집에 실패한항목수
+};
+
+//문자열을 소문자로 변환후 돌려줌
 static std::string ToLower(std::string s)
 {
-    for (char& c : s)c = (char)std::tolower((unsigned char)c);
+    for (char& c : s)
+        c = (char)std::tolower((unsigned char)c);
     return s;
 }
-
-
-//-  v0.2
-int main(int num, char* values[])
-
+//경로가 인자로 들어오면 사용/없으면 사용자입력
+static std::string GetPathFromArgsOrInput(int num, char* values[])
 {
     std::string path;
-
-    //경로받기//
     if (num >= 2) {
         path = values[1];
     }
     else {
-        std::cout << "스캔할 폴더 경로를 입력하시게나: ";
+        cout << "스캔할 폴더 경로를 입력하시게나: ";
         std::getline(std::cin, path);
     }
+    return path;
+}
 
+// 경로유효성 검사
+static bool ValidatePath(const std::string& path)
+{
     std::error_code ec;
 
-   
-    //유효성검사
     if (path.empty()) {
-        std::cout << "[오류] 경로가 비어있는게로구먼."<<endl;
-        return 1;
+        cout << "[오류] 경로가 비어있는게로구먼." << endl;
+        return false;
     }
-
-    //에러코드 초기화후 경로검사
+    //에러코드 초기화후 경로확인
     ec.clear();
-    bool exists = fs::exists(path, ec);
-    if(ec||!exists)
-    {
+    bool exists = fs::exists(path, ec); 
+    if (ec || !exists) {
         cout << "[오류] 경로 접근/확인 실패이외다: " << path;
-        if(ec) cout<< " (" << ec.message() << ")";
+        if (ec) cout << " (" << ec.message() << ")";
         cout << endl;
-        return 1;
-
+        return false;
     }
     //에러코드 초기화후 폴더확인
     ec.clear();
     bool isDir = fs::is_directory(path, ec);
-    if (ec || !isDir)
-    {
-        std::cout << "[오류] 폴더가 아닌게지라: " << path;
-        if(ec) cout<< " (" << ec.message() << ")";
+    if (ec || !isDir) {
+        cout << "[오류] 폴더가 아닌게지라: " << path;
+        if (ec) cout << " (" << ec.message() << ")";
         cout << endl;
-        return 1;
+        return false;
     }
 
-    //재귀순환-  v0.3//
-    std::size_t total = 0;
-    std::size_t files = 0;
-    std::size_t skipped = 0;
+    return true;
+}
 
-    //데이터수집 성공/실패-  v0.4
-    std::size_t data_ok = 0;
-    std::size_t data_fail = 0;
+// 스캔 + 데이터 수집
 
-    //FileEntry 저장-  v0.4
+//폴더 재귀순회 준비
+static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
+{
     std::vector<FileEntry> entries;
     entries.reserve(2048);
 
+    std::error_code ec;
+
     ec.clear();
-    fs::recursive_directory_iterator start(path, fs::directory_options::skip_permission_denied, ec);
+    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
     fs::recursive_directory_iterator end;
 
-
-    //-  v0.3
-    if (ec)
-    {
-        cout << "[오류] 디렉터리 순환 시작 실패:" << ec.message() << endl;
-        return 1;
+    if (ec) {
+        cout << "[오류] 디렉터리 순환 시작 실패: " << ec.message() << endl;
+        return entries; 
     }
-    for(; start!=end; start.increment(ec))
+    //순환중 오류는 스킵후 스캔을 이어나감
+    for (; it != end; it.increment(ec))
     {
-        ++total;
-        //접근에 문제가있다면 스킵하고 계속
-        if (ec)
-        {
-            ++skipped;
+        ++st.total;
+
+        // 순회중 오류가 있다면 스킵하고 계속
+        if (ec) {
+            ++st.skipped;
             ec.clear();
             continue;
         }
-        const fs::directory_entry& entry = *start;
 
-        //ec와 분리 ::파일판정은 iec로 
+        const fs::directory_entry& entry = *it;
+
+        // 파일 판정은 iec로 분리
+        //폴더를 순환하며 파일의 데이터수집,오류는 스킵
         std::error_code iec;
         if (entry.is_regular_file(iec))
         {
-            ++files;
+            ++st.files;
 
-            //데이터수집 -  v0.4
             FileEntry fe;
             fe.path = entry.path();
             fe.ext = ToLower(fe.path.extension().string());
 
+            // 데이터 수집은 mec로 분리
             std::error_code mec;
 
-            fe.size = entry.file_size(mec);
-            if (mec)
-            {
-                ++data_fail; ++skipped;
+            fe.size = entry.file_size(mec);//파일크기
+            if (mec) {
+                ++st.data_fail;
+                ++st.skipped;
                 continue;
             }
-            fe.mtime = entry.last_write_time(mec);
-            if (mec)
-            {
-                ++data_fail; ++skipped;
+
+            fe.mtime = entry.last_write_time(mec);//마지막 수정시간
+            if (mec) {
+                ++st.data_fail;
+                ++st.skipped;
                 continue;
             }
-            ++data_ok; 
+
+            ++st.data_ok;
             entries.push_back(std::move(fe));
         }
+        //파일 판정 자체가 실패한 경우 스킵
         else if (iec)
         {
-            ++skipped;
-        }    
+            // 파일 판정 자체가 실패한 경우 스킵
+            ++st.skipped;
+        }
+        // 정규 파일이 아닌 항목(폴더/링크 등)은 통과
     }
-    
-    //-  v0.3
-    cout << "=== 요약 ===" << endl;
-    cout << "총 스캔항목: " << total << endl;
-    cout << " 파일: " << files << endl;
-    cout << " 스킵항목: " << skipped << endl;
-    //-  v0.4
-    cout << " 데이터수집 파일 수: " << entries.size() << endl;
-    cout << " 데이터수집 성공: " << data_ok << endl;
-    cout << " 데이터수집 실패: " << data_fail << endl;
-    return 0;
 
+    return entries;
+}
+
+static void PrintSummary(const Stats& st, std::size_t collectedCount)
+{
+    cout << "\n=== 요약 ===" << endl;
+    cout << "총 스캔항목: " << st.total << endl;
+    cout << " 파일: " << st.files << endl;
+    cout << " 스킵항목: " << st.skipped << endl;
+    cout << " 데이터수집 파일 수: " << collectedCount << endl;
+    cout << " 데이터수집 성공: " << st.data_ok << endl;
+    cout << " 데이터수집 실패: " << st.data_fail << endl;
+}
+
+int main(int num, char* values[])
+{
+    // 경로 받기
+    std::string path = GetPathFromArgsOrInput(num, values);
+
+    // 유효성 검사
+    if (!ValidatePath(path))
+        return 1;
+
+    // 스캔 + 데이터 수집
+    Stats st;
+    auto entries = ScanDirectory(path, st);
+
+    // 요약 출력
+    PrintSummary(st, entries.size());
+
+    return 0;
 }
 
 // 프로그램 실행: <Ctrl+F5> 또는 [디버그] > [디버깅하지 않고 시작] 메뉴
