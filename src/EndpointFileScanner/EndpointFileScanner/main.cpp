@@ -24,12 +24,12 @@ struct FileEntry
 //파일의 전체합계/통계 저장
 struct Stats
 {
-    std::size_t total = 0; //총 스캔항목수
-    std::size_t files = 0;//파일로 판정된 항목수
-    std::size_t skipped = 0;//제외된 항목수
-      
-    std::size_t data_ok = 0;//데이터수집이 완료된 항목수
-    std::size_t data_fail = 0;//데이터수집에 실패한항목수
+    std::size_t total = 0;      //총 스캔항목수
+    std::size_t files = 0;      //파일로 판정된 항목수
+    std::size_t skipped = 0;    //제외된 항목수(오류/필터 제외 포함)
+
+    std::size_t data_ok = 0;    //데이터수집이 완료된 항목수
+    std::size_t data_fail = 0;  //데이터수집에 실패한항목수
 };
 
 //문자열을 소문자로 변환후 돌려줌
@@ -39,6 +39,7 @@ static std::string ToLower(std::string s)
         c = (char)std::tolower((unsigned char)c);
     return s;
 }
+
 //경로가 인자로 들어오면 사용/없으면 사용자입력
 static std::string GetPathFromArgsOrInput(int num, char* values[])
 {
@@ -62,16 +63,16 @@ static bool ValidatePath(const std::string& path)
         cout << "[오류] 경로가 비어있는게로구먼." << endl;
         return false;
     }
-    //에러코드 초기화후 경로확인
+
     ec.clear();
-    bool exists = fs::exists(path, ec); 
+    bool exists = fs::exists(path, ec);
     if (ec || !exists) {
         cout << "[오류] 경로 접근/확인 실패이외다: " << path;
         if (ec) cout << " (" << ec.message() << ")";
         cout << endl;
         return false;
     }
-    //에러코드 초기화후 폴더확인
+
     ec.clear();
     bool isDir = fs::is_directory(path, ec);
     if (ec || !isDir) {
@@ -84,9 +85,9 @@ static bool ValidatePath(const std::string& path)
     return true;
 }
 
-// 스캔 + 데이터 수집
+// -------------------- 스캔 + 데이터 수집 --------------------
 
-//폴더 재귀순회 준비
+// 폴더 재귀순회 준비
 static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
 {
     std::vector<FileEntry> entries;
@@ -100,9 +101,9 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
 
     if (ec) {
         cout << "[오류] 디렉터리 순환 시작 실패: " << ec.message() << endl;
-        return entries; 
+        return entries;
     }
-    //순환중 오류는 스킵후 스캔을 이어나감
+
     for (; it != end; it.increment(ec))
     {
         ++st.total;
@@ -130,14 +131,14 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
             // 데이터 수집은 mec로 분리
             std::error_code mec;
 
-            fe.size = entry.file_size(mec);//파일크기
+            fe.size = entry.file_size(mec);
             if (mec) {
                 ++st.data_fail;
                 ++st.skipped;
                 continue;
             }
 
-            fe.mtime = entry.last_write_time(mec);//마지막 수정시간
+            fe.mtime = entry.last_write_time(mec);
             if (mec) {
                 ++st.data_fail;
                 ++st.skipped;
@@ -159,13 +160,72 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
     return entries;
 }
 
-static void PrintSummary(const Stats& st, std::size_t collectedCount)
+// -------------------- Day4: 필터링 --------------------
+
+struct FilterConfig
+{
+    std::uintmax_t minSize = 0;              // 최소 크기
+    std::uintmax_t maxSize = 0;              // 최대 크기
+
+    std::vector<std::string> includeExts;    // 포함 확장자 목록(비어있다면 모두허용)
+    std::vector<std::string> excludeExts;    // 제외 확장자 목록(비어있다면 모두허용)
+};
+
+//확장자가 확장자 목록에 있는지 검사
+static bool InListInsensitive(const std::string& val, const std::vector<std::string>& list)
+{
+    for (const auto& x : list)
+        if (ToLower(val) == ToLower(x))
+            return true;
+    return false;
+}
+
+static std::vector<FileEntry> FilterEntries(const std::vector<FileEntry>& entries,
+    const FilterConfig& cfg,
+    Stats& st)
+{
+    std::vector<FileEntry> out;
+    out.reserve(entries.size());
+
+    for (const auto& e : entries)
+    {
+        bool reject = false;
+
+        // 1) 크기 필터
+        if (cfg.minSize != 0 && e.size < cfg.minSize) reject = true;
+        if (cfg.maxSize != 0 && e.size > cfg.maxSize) reject = true;
+
+        // 2) 포함확장자/제외확장자
+        if (!reject)
+        {
+            if (!cfg.includeExts.empty() && !InListInsensitive(e.ext, cfg.includeExts))
+                reject = true;
+
+            if (!cfg.excludeExts.empty() && InListInsensitive(e.ext, cfg.excludeExts))
+                reject = true;
+        }
+
+        if (reject)
+        {
+            ++st.skipped; // 필터로 제외된 것 스킵
+            continue;
+        }
+
+        out.push_back(e);
+    }
+
+    return out;
+}
+
+// -------------------- 출력 --------------------
+
+static void PrintSummary(const Stats& st, std::size_t filteredCount)
 {
     cout << "\n=== 요약 ===" << endl;
     cout << "총 스캔항목: " << st.total << endl;
     cout << " 파일: " << st.files << endl;
     cout << " 스킵항목: " << st.skipped << endl;
-    cout << " 데이터수집 파일 수: " << collectedCount << endl;
+    cout << " 필터 통과 파일 수: " << filteredCount << endl;
     cout << " 데이터수집 성공: " << st.data_ok << endl;
     cout << " 데이터수집 실패: " << st.data_fail << endl;
 }
@@ -183,11 +243,19 @@ int main(int num, char* values[])
     Stats st;
     auto entries = ScanDirectory(path, st);
 
-    // 요약 출력
-    PrintSummary(st, entries.size());
+    // 필터 설정(프로토타입 값)
+    FilterConfig cfg;
+    cfg.minSize = 1; // 0바이트 파일 제외
+    cfg.includeExts = { ".exe", ".dll", ".sys", ".txt" };
+    cfg.excludeExts = { ".tmp", ".log" };
 
+    auto filtered = FilterEntries(entries, cfg, st);
+
+    //요약출력
+    PrintSummary(st, filtered.size());
     return 0;
 }
+
 
 // 프로그램 실행: <Ctrl+F5> 또는 [디버그] > [디버깅하지 않고 시작] 메뉴
 // 프로그램 디버그: <F5> 키 또는 [디버그] > [디버깅 시작] 메뉴
