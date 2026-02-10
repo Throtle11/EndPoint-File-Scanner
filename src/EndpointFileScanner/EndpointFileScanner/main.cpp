@@ -7,6 +7,9 @@
 #include <system_error>
 #include <vector>
 #include <cctype>
+#include <algorithm>
+#include <iomanip>
+
 
 namespace fs = std::filesystem;
 using std::cout;
@@ -24,12 +27,13 @@ struct FileEntry
 //파일의 전체합계/통계 저장
 struct Stats
 {
-    std::size_t total = 0;      //총 스캔항목수
-    std::size_t files = 0;      //파일로 판정된 항목수
-    std::size_t skipped = 0;    //제외된 항목수(오류/필터 제외 포함)
+    std::size_t total = 0; //총 스캔항목수
+    std::size_t files = 0; //파일로 판정된 항목수
+    std::size_t dirs = 0;  //폴더로 판정된 항목수
+    std::size_t skipped = 0;//제외된 항목수(오류/필터 제외 포함)
 
-    std::size_t data_ok = 0;    //데이터수집이 완료된 항목수
-    std::size_t data_fail = 0;  //데이터수집에 실패한항목수
+    std::size_t data_ok = 0;//데이터수집이 완료된 항목수
+    std::size_t data_fail = 0;//데이터수집에 실패한항목수
 };
 
 //문자열을 소문자로 변환후 돌려줌
@@ -85,7 +89,7 @@ static bool ValidatePath(const std::string& path)
     return true;
 }
 
-// -------------------- 스캔 + 데이터 수집 --------------------
+// ============================= 스캔 + 데이터 수집 =============================
 
 // 폴더 재귀순회 준비
 static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
@@ -131,14 +135,14 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
             // 데이터 수집은 mec로 분리
             std::error_code mec;
 
-            fe.size = entry.file_size(mec);
+            fe.size = entry.file_size(mec);//파일크기
             if (mec) {
                 ++st.data_fail;
                 ++st.skipped;
                 continue;
             }
 
-            fe.mtime = entry.last_write_time(mec);
+            fe.mtime = entry.last_write_time(mec);//마지막 수정시간
             if (mec) {
                 ++st.data_fail;
                 ++st.skipped;
@@ -148,8 +152,18 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
             ++st.data_ok;
             entries.push_back(std::move(fe));
         }
-        //파일 판정 자체가 실패한 경우 스킵
-        else if (iec)
+        // 파일이 아니고, 판정 오류도 아니라면(폴더/링크 등)
+        else if (!iec)
+        {
+            // 폴더 수 집계
+            std::error_code dec;
+            if (entry.is_directory(dec) && !dec)
+                ++st.dirs;
+
+            // 폴더가 아니면 통과
+        }
+        // 판정 자체가 실패(오류)
+        else
         {
             // 파일 판정 자체가 실패한 경우 스킵
             ++st.skipped;
@@ -160,7 +174,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
     return entries;
 }
 
-// -------------------- Day4: 필터링 --------------------
+// ============================= 필터링 =============================
 
 struct FilterConfig
 {
@@ -190,12 +204,11 @@ static std::vector<FileEntry> FilterEntries(const std::vector<FileEntry>& entrie
     for (const auto& e : entries)
     {
         bool reject = false;
-
-        // 1) 크기 필터
+        //크기 필터
         if (cfg.minSize != 0 && e.size < cfg.minSize) reject = true;
         if (cfg.maxSize != 0 && e.size > cfg.maxSize) reject = true;
 
-        // 2) 포함확장자/제외확장자
+        //포함확장자/제외확장자
         if (!reject)
         {
             if (!cfg.includeExts.empty() && !InListInsensitive(e.ext, cfg.includeExts))
@@ -217,12 +230,63 @@ static std::vector<FileEntry> FilterEntries(const std::vector<FileEntry>& entrie
     return out;
 }
 
+// =============================콘솔 표 출력=============================
+
+static std::string TruncateMiddle(const std::string& s, std::size_t maxLen)
+{
+    if (s.size() <= maxLen) return s;
+    if (maxLen <= 3) return s.substr(0, maxLen);
+    //남겨둘 문자수
+    std::size_t keep = maxLen - 3;
+    std::size_t head = keep / 2;
+    std::size_t tail = keep - head;
+
+    return s.substr(0, head) + "..." + s.substr(s.size() - tail);
+}
+
+static void PrintTableHeader()
+{
+    cout << "=== 결과(미리보기) ===" << endl;
+    cout << std::left
+        << std::setw(6) << "No"
+        << std::setw(12) << "Size"
+        << std::setw(8) << "Ext"
+        << "Path" << endl;
+
+    cout << std::string(6 + 12 + 8 + 90, '-') << endl;//구분선
+}
+
+static void PrintEntriesTable(std::vector<FileEntry> entries, std::size_t topN)
+{
+    std::sort(entries.begin(), entries.end(),
+        [](const FileEntry& a, const FileEntry& b) { return a.size > b.size; });
+
+    PrintTableHeader();
+
+    std::size_t n = std::min(topN, entries.size());
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const auto& e = entries[i];
+        std::string pathStr = TruncateMiddle(e.path.u8string(), 100);
+
+        cout << std::left
+            << std::setw(6) << (i + 1)
+            << std::setw(12) << e.size
+            << std::setw(8) << e.ext
+            << pathStr << endl;
+    }
+
+    if (entries.size() > topN)
+        cout << "... (" << (entries.size() - topN) << "개 더 있음)" << endl;
+}
+
 // -------------------- 출력 --------------------
 
 static void PrintSummary(const Stats& st, std::size_t filteredCount)
 {
     cout << "\n=== 요약 ===" << endl;
     cout << "총 스캔항목: " << st.total << endl;
+    cout << " 폴더: " << st.dirs << endl;
     cout << " 파일: " << st.files << endl;
     cout << " 스킵항목: " << st.skipped << endl;
     cout << " 필터 통과 파일 수: " << filteredCount << endl;
@@ -243,16 +307,22 @@ int main(int num, char* values[])
     Stats st;
     auto entries = ScanDirectory(path, st);
 
-    // 필터 설정(프로토타입 값)
+    // 크기필터 설정(프로토타입 필터값)
     FilterConfig cfg;
-    cfg.minSize = 1; // 0바이트 파일 제외
+    cfg.minSize = 1;
+    // 포함 확장자(프로토타입 필터값)
     cfg.includeExts = { ".exe", ".dll", ".sys", ".txt" };
+    // 제외 확장자(프로토타입 필터값)
     cfg.excludeExts = { ".tmp", ".log" };
 
     auto filtered = FilterEntries(entries, cfg, st);
 
-    //요약출력
+    // 표 출력(상위 10개)
+    PrintEntriesTable(filtered, 10);
+
+    // 요약 출력
     PrintSummary(st, filtered.size());
+
     return 0;
 }
 
