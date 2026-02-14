@@ -9,6 +9,8 @@
 #include <cctype>
 #include <algorithm>
 #include <iomanip>
+#include <fstream>
+#include <sstream>
 
 
 namespace fs = std::filesystem;
@@ -36,6 +38,13 @@ struct Stats
     std::size_t data_fail = 0;//데이터수집에 실패한항목수
 };
 
+// 실행 옵션(스캔 경로, CSV 저장 경로)을 담는 구조체
+struct CliOptions
+{
+    std::string scanPath; // 스캔 대상 폴더
+    std::string outPath;  // --out으로 받은 CSV 경로(없으면 빈 문자열)
+};
+
 //문자열을 소문자로 변환후 돌려줌
 static std::string ToLower(std::string s)
 {
@@ -44,17 +53,108 @@ static std::string ToLower(std::string s)
     return s;
 }
 
+//=============================입력 1줄 토큰화 =============================
+// 예: "C:\Test Folder" --out "out report.csv"
+static std::vector<std::string> TokenizeCommandLine(const std::string& line)
+{
+    std::vector<std::string> tokens;
+    std::string cur;
+    bool inQuotes = false;
+
+    for (char c : line)
+    {
+        if (c == '"') { inQuotes = !inQuotes; continue; }
+
+        if (!inQuotes && std::isspace((unsigned char)c))
+        {
+            if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
+            continue;
+        }
+
+        cur.push_back(c);
+    }
+
+    if (!cur.empty()) tokens.push_back(cur);
+    return tokens;
+}
+
+// 실행 인자에서 스캔 경로와 --out(저장 경로)을 찾아서 저장
+static CliOptions ParseArgs(int argc, char* argv[])
+{
+    CliOptions opt;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string a = argv[i];
+
+        // --out <file>
+        if (a == "--out")
+        {
+            if (i + 1 < argc)
+            {
+                opt.outPath = argv[i + 1];
+                ++i; // 다음 인자 소비
+            }
+            else
+            {
+                cout << "[오류] --out 뒤에 파일 경로가 필요하외다." << endl;
+            }
+            continue;
+        }
+ 
+//옵션이 아닌 첫 인자를 스캔 경로로 정함
+        if (!a.empty() && a[0] != '-' && opt.scanPath.empty())
+        { 
+            opt.scanPath = a;
+        }
+    }
+
+    return opt;
+}
+
 //경로가 인자로 들어오면 사용/없으면 사용자입력
-static std::string GetPathFromArgsOrInput(int num, char* values[])
+static std::string GetPathFromArgsOrInput(int num, char* values[], CliOptions& opt)
 {
     std::string path;
-    if (num >= 2) {
+
+    if (num >= 2)
+    {
         path = values[1];
+        if (opt.scanPath.empty())
+            opt.scanPath = path;
+        return path;
     }
-    else {
-        cout << "스캔할 폴더 경로를 입력하시게나: ";
-        std::getline(std::cin, path);
+
+    cout << "스캔할 폴더 경로를 입력하시게나:";
+    std::string line;
+    std::getline(std::cin, line);
+
+    //입력된 경로를 토큰으로 분해
+    auto tokens = TokenizeCommandLine(line);
+    if (tokens.empty())
+        return "";
+
+    // 첫 토큰: 스캔 경로
+    path = tokens[0];
+    opt.scanPath = path;
+
+    // 나머지 토큰
+    for (size_t i = 1; i < tokens.size(); ++i)
+    {
+        if (tokens[i] == "--out")
+        {
+            if (i + 1 < tokens.size())
+            {
+                opt.outPath = tokens[i + 1];
+                ++i;
+            }
+            else
+            {
+                cout << "[오류] --out 뒤에 파일 경로를 입력하시게나:" << endl;
+            }
+        }
     }
+
     return path;
 }
 
@@ -280,6 +380,58 @@ static void PrintEntriesTable(std::vector<FileEntry> entries, std::size_t topN)
         cout << "... (" << (entries.size() - topN) << "개 더 있음)" << endl;
 }
 
+// CSV 출력
+static std::string EscapeCsv(const std::string& s)
+
+//따옴표검사
+{
+    bool needQuote = false;
+    for (char c : s)
+    {
+        if (c == '"' || c == ',' || c == '\n' || c == '\r')
+        {
+            needQuote = true;
+            break;
+        }
+    }
+    if (!needQuote) return s;
+
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('"');
+    for (char c : s)
+    {
+        if (c == '"') out += "\"\"";
+        else out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+
+// entries를 CSV로 저장
+static bool WriteCsv(const std::string& outPath, const std::vector<FileEntry>& entries)
+{
+    //폴더가 없으면 생성 시도(실패시 ofstream에서 다시 걸러짐)
+    std::error_code ec;
+    fs::path p(outPath);
+    if (p.has_parent_path())
+        fs::create_directories(p.parent_path(), ec);
+
+    //파일에 쓰기
+    std::ofstream ofs(outPath, std::ios::binary);
+    if (!ofs) return false;
+
+    ofs << "Path,Size,Ext"<<endl;
+    for (const auto& e : entries)
+    {
+        std::string pathStr = e.path.u8string();
+        ofs << EscapeCsv(pathStr) << ','
+            << e.size << ','
+            << EscapeCsv(e.ext) << endl;
+    }
+    return true;
+}
+
 // -------------------- 출력 --------------------
 
 static void PrintSummary(const Stats& st, std::size_t filteredCount)
@@ -296,8 +448,11 @@ static void PrintSummary(const Stats& st, std::size_t filteredCount)
 
 int main(int num, char* values[])
 {
+    // values 파싱(--out / 스캔경로)
+    CliOptions opt = ParseArgs(num, values);
+
     // 경로 받기
-    std::string path = GetPathFromArgsOrInput(num, values);
+    std::string path = GetPathFromArgsOrInput(num, values, opt);
 
     // 유효성 검사
     if (!ValidatePath(path))
@@ -320,11 +475,34 @@ int main(int num, char* values[])
     // 표 출력(상위 10개)
     PrintEntriesTable(filtered, 10);
 
+    // CSV 저장 경로 결정
+    // 저장경로 없이 그냥 엔터치면 기본값 "report.csv"로 저장
+    std::string outPath = opt.outPath;
+
+    if (outPath.empty())
+    {
+        cout << "\nCSV 저장 경로를 입력하시게나: ";
+        std::getline(std::cin, outPath);
+        if (outPath.empty())
+            outPath = "report.csv";
+    }
+
+    // CSV 저장
+    if (!WriteCsv(outPath, filtered))
+    {
+        cout << "\n[오류] CSV 저장 실패이외다: " << outPath << endl;
+    }
+    else
+    {
+        cout << "\n[완료] CSV 저장 완료이외다: " << outPath << endl;
+    }
+
     // 요약 출력
     PrintSummary(st, filtered.size());
 
     return 0;
 }
+
 
 
 // 프로그램 실행: <Ctrl+F5> 또는 [디버그] > [디버깅하지 않고 시작] 메뉴
