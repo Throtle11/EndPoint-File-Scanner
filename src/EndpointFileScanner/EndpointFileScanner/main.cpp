@@ -11,11 +11,51 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
+#include <chrono>
+#include <ctime>
 
 
 namespace fs = std::filesystem;
 using std::cout;
 using std::endl;
+
+//============================= 로그출력 =============================
+
+static std::ofstream g_log;
+
+static std::string NowString()
+{
+    using namespace std::chrono;
+
+    auto now = system_clock::now();
+    std::time_t tt = system_clock::to_time_t(now);
+
+    std::tm time{};
+#ifdef _WIN32
+    //윈도우
+    localtime_s(&time, &tt);
+#else
+    //유닉스,리눅스
+    localtime_r(&time, &tt);
+#endif
+
+    std::ostringstream oss;
+    oss << std::put_time(&time, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
+
+//콘솔,파일에 로그출력
+static void Log(const std::string& level, const std::string& msg)
+{
+    std::string line = "[" + NowString() + "][" + level + "] " + msg;
+
+    // 콘솔
+    cout << line << endl;
+
+    // 파일
+    if (g_log.is_open())
+        g_log << line << endl;
+}
 
 //파일의 상세정보 기록
 struct FileEntry
@@ -54,7 +94,7 @@ static std::string ToLower(std::string s)
 }
 
 //=============================입력 1줄 토큰화 =============================
-// 예: "C:\Test Folder" --out "out report.csv"
+// 예: "C:\Program Files" --out "report.csv"
 static std::vector<std::string> TokenizeCommandLine(const std::string& line)
 {
     std::vector<std::string> tokens;
@@ -98,13 +138,14 @@ static CliOptions ParseArgs(int argc, char* argv[])
             else
             {
                 cout << "[오류] --out 뒤에 파일 경로가 필요하외다." << endl;
+                Log("[에러]", "--out 뒤에 파일 경로가 없구먼");
             }
             continue;
         }
- 
-//옵션이 아닌 첫 인자를 스캔 경로로 정함
+
+        //옵션이 아닌 첫 인자를 스캔 경로로 정함
         if (!a.empty() && a[0] != '-' && opt.scanPath.empty())
-        { 
+        {
             opt.scanPath = a;
         }
     }
@@ -151,6 +192,7 @@ static std::string GetPathFromArgsOrInput(int num, char* values[], CliOptions& o
             else
             {
                 cout << "[오류] --out 뒤에 파일 경로를 입력하시게나:" << endl;
+                Log("[에러]", "--out 뒤에 파일 경로가 없구먼");
             }
         }
     }
@@ -165,6 +207,7 @@ static bool ValidatePath(const std::string& path)
 
     if (path.empty()) {
         cout << "[오류] 경로가 비어있는게로구먼." << endl;
+        Log("[에러]", "경로가 비어있구먼");
         return false;
     }
 
@@ -174,6 +217,8 @@ static bool ValidatePath(const std::string& path)
         cout << "[오류] 경로 접근/확인 실패이외다: " << path;
         if (ec) cout << " (" << ec.message() << ")";
         cout << endl;
+
+        Log("[에러]", "경로 접근/확인 실패일세: " + path + (ec ? (" (" + ec.message() + ")") : ""));
         return false;
     }
 
@@ -183,6 +228,8 @@ static bool ValidatePath(const std::string& path)
         cout << "[오류] 폴더가 아닌게지라: " << path;
         if (ec) cout << " (" << ec.message() << ")";
         cout << endl;
+
+        Log("[에러]", "폴더 아님/확인 실패일세: " + path + (ec ? (" (" + ec.message() + ")") : ""));
         return false;
     }
 
@@ -204,7 +251,8 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
     fs::recursive_directory_iterator end;
 
     if (ec) {
-        cout << "[오류] 디렉터리 순환 시작 실패: " << ec.message() << endl;
+        cout << "[오류] 디렉터리 순환 시작 실패일세: " << ec.message() << endl;
+        Log("[에러]", "디렉터리 순환 시작 실패일세: " + root.u8string() + " (" + ec.message() + ")");
         return entries;
     }
 
@@ -215,6 +263,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
         // 순회중 오류가 있다면 스킵하고 계속
         if (ec) {
             ++st.skipped;
+            Log("[WARNING]", "순회 중 오류로 스킵하겠소: (" + ec.message() + ")");
             ec.clear();
             continue;
         }
@@ -239,6 +288,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
             if (mec) {
                 ++st.data_fail;
                 ++st.skipped;
+                Log("[WARNING]", "file_size 실패로 스킵하겠소: " + fe.path.u8string() + " (" + mec.message() + ")");
                 continue;
             }
 
@@ -246,6 +296,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
             if (mec) {
                 ++st.data_fail;
                 ++st.skipped;
+                Log("[WARNING]", "last_write_time 실패로 스킵하겠소: " + fe.path.u8string() + " (" + mec.message() + ")");
                 continue;
             }
 
@@ -259,6 +310,11 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
             std::error_code dec;
             if (entry.is_directory(dec) && !dec)
                 ++st.dirs;
+            else if (dec)
+            {
+                ++st.skipped;
+                Log("[WARNING]", "디렉터리 판정 실패로 스킵하겠소: " + entry.path().u8string() + " (" + dec.message() + ")");
+            }
 
             // 폴더가 아니면 통과
         }
@@ -267,6 +323,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
         {
             // 파일 판정 자체가 실패한 경우 스킵
             ++st.skipped;
+            Log("[WARNING]", "정규 파일 판정 실패로 스킵하겠소: " + entry.path().u8string() + " (" + iec.message() + ")");
         }
         // 정규 파일이 아닌 항목(폴더/링크 등)은 통과
     }
@@ -321,6 +378,7 @@ static std::vector<FileEntry> FilterEntries(const std::vector<FileEntry>& entrie
         if (reject)
         {
             ++st.skipped; // 필터로 제외된 것 스킵
+            // (원한다면 여기서도 로그 가능하나, 로그가 너무 많아질 수 있어 기본은 생략)
             continue;
         }
 
@@ -419,9 +477,12 @@ static bool WriteCsv(const std::string& outPath, const std::vector<FileEntry>& e
 
     //파일에 쓰기
     std::ofstream ofs(outPath, std::ios::binary);
-    if (!ofs) return false;
+    if (!ofs) {
+        Log("[에러]", "CSV 파일 열기 실패: " + outPath);
+        return false;
+    }
 
-    ofs << "Path,Size,Ext"<<endl;
+    ofs << "Path,Size,Ext" << endl;
     for (const auto& e : entries)
     {
         std::string pathStr = e.path.u8string();
@@ -448,6 +509,13 @@ static void PrintSummary(const Stats& st, std::size_t filteredCount)
 
 int main(int num, char* values[])
 {
+    //로그 파일 열기
+    g_log.open("scanner.log", std::ios::app);
+    if (!g_log.is_open())
+        cout << "[경고] 로그 파일(scanner.log) 열기 실패이외다." << endl;
+    else
+        Log("[INFORMATION]", "프로그램 시작일세");
+
     // values 파싱(--out / 스캔경로)
     CliOptions opt = ParseArgs(num, values);
 
@@ -457,6 +525,8 @@ int main(int num, char* values[])
     // 유효성 검사
     if (!ValidatePath(path))
         return 1;
+
+    Log("[INFORMATION]", "스캔을 시작하겠네: " + path);
 
     // 스캔 + 데이터 수집
     Stats st;
@@ -491,15 +561,18 @@ int main(int num, char* values[])
     if (!WriteCsv(outPath, filtered))
     {
         cout << "\n[오류] CSV 저장 실패이외다: " << outPath << endl;
+        Log("[에러]", "CSV 저장 실패일세: " + outPath);
     }
     else
     {
         cout << "\n[완료] CSV 저장 완료이외다: " << outPath << endl;
+        Log("[INFORMATION]", "CSV 저장 완료일세: " + outPath);
     }
 
     // 요약 출력
     PrintSummary(st, filtered.size());
 
+    Log("[INFORMATION]", "프로그램을 종료하겠소이다");
     return 0;
 }
 
