@@ -1,5 +1,10 @@
 ﻿// EndpointFileScanner.cpp : 이 파일에는 'main' 함수가 포함됩니다. 거기서 프로그램 실행이 시작되고 종료됩니다.
-//
+// 
+//문자깨짐현상으로 인한 추가 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+//윈도우가 아니면 컴파일되지않음
 
 #include <iostream>
 #include <string>
@@ -43,6 +48,59 @@ static std::string NowString()
     oss << std::put_time(&time, "%Y-%m-%d %H:%M:%S");
     return oss.str();
 }
+
+//문자깨짐현상으로 인한 UTF-8 콘솔 출력 지원(윈도우)
+#ifdef _WIN32
+static std::wstring Utf8ToWide(const std::string& s)
+{
+    if (s.empty()) return std::wstring();
+
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (len <= 0) return std::wstring();
+
+    std::wstring w;
+    w.resize(len);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], len);
+    return w;
+}
+
+static void ConsoleWriteWide(const std::wstring& w)
+{
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h == INVALID_HANDLE_VALUE || h == nullptr)
+    {
+        // 콘솔 핸들이 아니면 fallback
+        std::string s(w.begin(), w.end());
+        cout << s;
+        return;
+    }
+
+    DWORD mode = 0;
+    if (!GetConsoleMode(h, &mode))
+    {
+        // 리디렉션/파일 등 콘솔이 아니면 fallback
+        std::string s(w.begin(), w.end());
+        cout << s;
+        return;
+    }
+
+    DWORD written = 0;
+    WriteConsoleW(h, w.c_str(), (DWORD)w.size(), &written, nullptr);
+}
+
+// 유니코드(UTF-16) 문자 단위로 가운데 축약하여 문자열 손상 방지
+static std::wstring TruncateMiddleW(const std::wstring& s, std::size_t maxLen)
+{
+    if (s.size() <= maxLen) return s;
+    if (maxLen <= 3) return s.substr(0, maxLen);
+
+    std::size_t keep = maxLen - 3;
+    std::size_t head = keep / 2;
+    std::size_t tail = keep - head;
+
+    return s.substr(0, head) + L"..." + s.substr(s.size() - tail);
+}
+#endif
 
 //콘솔,파일에 로그출력
 static void Log(const std::string& level, const std::string& msg)
@@ -421,17 +479,26 @@ static void PrintEntriesTable(std::vector<FileEntry> entries, std::size_t topN)
 
     PrintTableHeader();
 
-    std::size_t n = std::min(topN, entries.size());
+    std::size_t n = (std::min)(topN, entries.size());
     for (std::size_t i = 0; i < n; ++i)
     {
         const auto& e = entries[i];
-        std::string pathStr = TruncateMiddle(e.path.u8string(), 100);
+        std::string pathStr = e.path.u8string();
 
         cout << std::left
             << std::setw(6) << (i + 1)
             << std::setw(12) << e.size
-            << std::setw(8) << e.ext
-            << pathStr << endl;
+            << std::setw(8) << e.ext;
+
+		//문자깨짐현상으로 인한 UTF-8 콘솔 출력 지원(윈도우)
+#ifdef _WIN32
+        std::wstring wpath = Utf8ToWide(pathStr);
+        std::wstring wpathTr = TruncateMiddleW(wpath, 100);
+        ConsoleWriteWide(wpathTr);
+        cout << endl;
+#else
+        cout << pathStr << endl;
+#endif
     }
 
     if (entries.size() > topN)
@@ -493,7 +560,7 @@ static bool WriteCsv(const std::string& outPath, const std::vector<FileEntry>& e
     return true;
 }
 
-// -------------------- 출력 --------------------
+// ========================== 출력 ==========================
 
 static void PrintSummary(const Stats& st, std::size_t filteredCount)
 {
@@ -509,6 +576,13 @@ static void PrintSummary(const Stats& st, std::size_t filteredCount)
 
 int main(int num, char* values[])
 {
+	//문자깨짐현상으로 인한 콘솔 UTF-8 설정(윈도우)
+#ifdef _WIN32
+    SetConsoleOutputCP(949);
+    SetConsoleCP(949);
+#endif
+
+
     //로그 파일 열기
     g_log.open("scanner.log", std::ios::app);
     if (!g_log.is_open())
