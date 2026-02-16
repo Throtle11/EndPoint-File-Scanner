@@ -2,6 +2,7 @@
 // 
 //문자깨짐현상으로 인한 추가 
 #ifdef _WIN32
+#define NOMINMAX
 #include <windows.h>
 #endif
 //윈도우가 아니면 컴파일되지않음
@@ -18,11 +19,130 @@
 #include <sstream>
 #include <chrono>
 #include <ctime>
+#include <utility>
 
 
 namespace fs = std::filesystem;
 using std::cout;
 using std::endl;
+
+
+//============================= 데이터 구조체 =============================
+
+//파일의 상세정보 기록
+struct FileEntry
+{
+    fs::path path; //파일 전체경로 저장
+    std::uintmax_t size = 0; //파일의 크기를 바이트 단위로 저장
+    std::string ext;//파일의 확장자를 문자열로 저장
+    fs::file_time_type mtime;//파일의 마지막 수정 시간 저장
+};
+
+//파일의 전체합계/통계 저장
+struct Stats
+{
+    std::size_t total = 0; //총 스캔항목수
+    std::size_t files = 0; //파일로 판정된 항목수
+    std::size_t dirs = 0;  //폴더로 판정된 항목수
+    std::size_t skipped = 0;//제외된 항목수(오류/필터 제외 포함)
+
+    std::size_t data_ok = 0;//데이터수집이 완료된 항목수
+    std::size_t data_fail = 0;//데이터수집에 실패한항목수
+};
+
+// 실행 옵션(스캔 경로, CSV 저장 경로)을 담는 구조체
+struct CliOptions
+{
+    std::string scanPath; // 스캔 대상 폴더
+    std::string outPath;  // --out으로 받은 CSV 경로(없으면 빈 문자열)
+};
+
+//파일 필터링 조건 구조체 
+struct FilterConfig
+{
+    std::uintmax_t minSize = 0;              // 최소 크기
+    std::uintmax_t maxSize = 0;              // 최대 크기
+
+    std::vector<std::string> includeExts;    // 포함 확장자 목록(비어있다면 모두허용)
+    std::vector<std::string> excludeExts;    // 제외 확장자 목록(비어있다면 모두허용)
+};
+
+
+//============================= 범용 유틸 =============================
+
+//문자열을 소문자로 변환
+static std::string ToLower(std::string s)
+{
+    for (char& c : s)
+        c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+//=============================입력 1줄 토큰화 =============================
+// 예: "C:\Program Files" --out "report.csv"
+static std::vector<std::string> TokenizeCommandLine(const std::string& line)
+{
+    std::vector<std::string> tokens; //토큰을 저장할 배열
+    std::string cur; //현재 처리중인 토근을 담아둠
+    bool inQuotes = false;
+
+    for (char c : line)
+    {
+        if (c == '"') { inQuotes = !inQuotes; continue; }
+
+        if (!inQuotes && std::isspace((unsigned char)c))
+        {
+            if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
+            continue;
+        }
+
+        cur.push_back(c);
+    }
+
+    if (!cur.empty()) tokens.push_back(cur);
+    return tokens;
+}
+
+//확장자가 확장자 목록에 있는지 검사
+static bool InListInsensitive(const std::string& val, const std::vector<std::string>& list)
+{
+    for (const auto& x : list)  
+        if (ToLower(val) == ToLower(x))
+            return true;
+    return false;
+}
+
+
+//============================= RAII 스코프가드 =============================
+
+template <class F>
+class ScopeGuard
+{
+private:
+    F func_;
+    bool active_;
+public:
+    explicit ScopeGuard(F f) : func_(std::move(f)), active_(true) {}
+    ~ScopeGuard() { if (active_) func_(); }
+
+    ScopeGuard(const ScopeGuard&) = delete;
+    ScopeGuard& operator=(const ScopeGuard&) = delete;
+
+    ScopeGuard(ScopeGuard&& other) noexcept
+        : func_(std::move(other.func_)), active_(other.active_)
+    {
+        other.active_ = false;
+    }
+
+    void Dismiss() { active_ = false; }
+};
+
+template <class F>
+static ScopeGuard<F> MakeScopeGuard(F f)
+{
+    return ScopeGuard<F>(std::move(f));
+}
+
 
 //============================= 로그출력 =============================
 
@@ -49,6 +169,22 @@ static std::string NowString()
     return oss.str();
 }
 
+//콘솔,파일에 로그출력
+static void Log(const std::string& level, const std::string& msg)
+{
+    std::string line = "[" + NowString() + "][" + level + "] " + msg;
+
+    // 콘솔
+    cout << line << endl;
+
+    // 파일
+    if (g_log.is_open())
+        g_log << line << endl;
+}
+
+
+//============================= 문자깨짐 현상 출력지원 =============================
+
 //문자깨짐현상으로 인한 UTF-8 콘솔 출력 지원(윈도우)
 #ifdef _WIN32
 static std::wstring Utf8ToWide(const std::string& s)
@@ -63,6 +199,7 @@ static std::wstring Utf8ToWide(const std::string& s)
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], len);
     return w;
 }
+
 //윈도우콘솔에 유니코드 출력
 static void ConsoleWriteWide(const std::wstring& w)
 {
@@ -74,6 +211,7 @@ static void ConsoleWriteWide(const std::wstring& w)
         cout << s;
         return;
     }
+
     //콘솔인지 확인
     DWORD mode = 0;
     if (!GetConsoleMode(h, &mode))
@@ -83,6 +221,7 @@ static void ConsoleWriteWide(const std::wstring& w)
         cout << s;
         return;
     }
+
     //문자열을 콘솔에 출력
     //요청한 글자수와 실제 출력된 글자수가 달랐을경우 에러메시지 출력
     DWORD written = 0;
@@ -108,79 +247,7 @@ static std::wstring TruncateMiddleW(const std::wstring& s, std::size_t maxLen)
 }
 #endif
 
-//콘솔,파일에 로그출력
-static void Log(const std::string& level, const std::string& msg)
-{
-    std::string line = "[" + NowString() + "][" + level + "] " + msg;
 
-    // 콘솔
-    cout << line << endl;
-
-    // 파일
-    if (g_log.is_open())
-        g_log << line << endl;
-}
-
-//파일의 상세정보 기록
-struct FileEntry
-{
-    fs::path path;
-    std::uintmax_t size = 0;
-    std::string ext;
-    fs::file_time_type mtime;
-};
-
-//파일의 전체합계/통계 저장
-struct Stats
-{
-    std::size_t total = 0; //총 스캔항목수
-    std::size_t files = 0; //파일로 판정된 항목수
-    std::size_t dirs = 0;  //폴더로 판정된 항목수
-    std::size_t skipped = 0;//제외된 항목수(오류/필터 제외 포함)
-
-    std::size_t data_ok = 0;//데이터수집이 완료된 항목수
-    std::size_t data_fail = 0;//데이터수집에 실패한항목수
-};
-
-// 실행 옵션(스캔 경로, CSV 저장 경로)을 담는 구조체
-struct CliOptions
-{
-    std::string scanPath; // 스캔 대상 폴더
-    std::string outPath;  // --out으로 받은 CSV 경로(없으면 빈 문자열)
-};
-
-//문자열을 소문자로 변환
-static std::string ToLower(std::string s)
-{
-    for (char& c : s)
-        c = (char)std::tolower((unsigned char)c);
-    return s;
-}
-
-//=============================입력 1줄 토큰화 =============================
-// 예: "C:\Program Files" --out "report.csv"
-static std::vector<std::string> TokenizeCommandLine(const std::string& line)
-{
-    std::vector<std::string> tokens;
-    std::string cur;
-    bool inQuotes = false;
-
-    for (char c : line)
-    {
-        if (c == '"') { inQuotes = !inQuotes; continue; }
-
-        if (!inQuotes && std::isspace((unsigned char)c))
-        {
-            if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
-            continue;
-        }
-
-        cur.push_back(c);
-    }
-
-    if (!cur.empty()) tokens.push_back(cur);
-    return tokens;
-}
 
 // 실행 인자에서 스캔 경로와 --out(저장 경로)을 찾아서 저장
 static CliOptions ParseArgs(int argc, char* argv[])
@@ -300,8 +367,7 @@ static bool ValidatePath(const std::string& path)
     return true;
 }
 
-// ============================= 스캔 + 데이터 수집 =============================
-
+//============================= 스캔 + 데이터 수집 =============================
 // 폴더 재귀순회 준비
 static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
 {
@@ -395,26 +461,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
     return entries;
 }
 
-// ============================= 필터링 =============================
-
-struct FilterConfig
-{
-    std::uintmax_t minSize = 0;              // 최소 크기
-    std::uintmax_t maxSize = 0;              // 최대 크기
-
-    std::vector<std::string> includeExts;    // 포함 확장자 목록(비어있다면 모두허용)
-    std::vector<std::string> excludeExts;    // 제외 확장자 목록(비어있다면 모두허용)
-};
-
-//확장자가 확장자 목록에 있는지 검사
-static bool InListInsensitive(const std::string& val, const std::vector<std::string>& list)
-{
-    for (const auto& x : list)
-        if (ToLower(val) == ToLower(x))
-            return true;
-    return false;
-}
-
+//============================= 필터링 =============================
 static std::vector<FileEntry> FilterEntries(const std::vector<FileEntry>& entries,
     const FilterConfig& cfg,
     Stats& st)
@@ -451,7 +498,8 @@ static std::vector<FileEntry> FilterEntries(const std::vector<FileEntry>& entrie
     return out;
 }
 
-// =============================콘솔 표 출력=============================
+
+//============================= 콘솔 표 출력 =============================
 
 static std::string TruncateMiddle(const std::string& s, std::size_t maxLen)
 {
@@ -484,7 +532,7 @@ static void PrintEntriesTable(std::vector<FileEntry> entries, std::size_t topN)
 
     PrintTableHeader();
 
-    std::size_t n = (std::min)(topN, entries.size());
+    std::size_t n = std::min(topN, entries.size());
     for (std::size_t i = 0; i < n; ++i)
     {
         const auto& e = entries[i];
@@ -495,7 +543,7 @@ static void PrintEntriesTable(std::vector<FileEntry> entries, std::size_t topN)
             << std::setw(12) << e.size
             << std::setw(8) << e.ext;
 
-		//문자깨짐현상으로 인한 UTF-8 콘솔 출력 지원(윈도우)
+        //문자깨짐현상으로 인한 UTF-8 콘솔 출력 지원(윈도우)
 #ifdef _WIN32
         std::wstring wpath = Utf8ToWide(pathStr);
         std::wstring wpathTr = TruncateMiddleW(wpath, 100);
@@ -509,6 +557,9 @@ static void PrintEntriesTable(std::vector<FileEntry> entries, std::size_t topN)
     if (entries.size() > topN)
         cout << "... (" << (entries.size() - topN) << "개 더 있음)" << endl;
 }
+
+
+//============================= CSV 저장 =============================
 
 // CSV 출력
 static std::string EscapeCsv(const std::string& s)
@@ -565,7 +616,8 @@ static bool WriteCsv(const std::string& outPath, const std::vector<FileEntry>& e
     return true;
 }
 
-// ========================== 출력 ==========================
+
+//============================= 출력 =============================
 
 static void PrintSummary(const Stats& st, std::size_t filteredCount)
 {
@@ -579,9 +631,12 @@ static void PrintSummary(const Stats& st, std::size_t filteredCount)
     cout << " 데이터수집 실패: " << st.data_fail << endl;
 }
 
+
+//============================= main =============================
+
 int main(int num, char* values[])
 {
-	//문자깨짐현상으로 인한 콘솔 UTF-8 설정(윈도우)
+    //문자깨짐현상으로 인한 콘솔 UTF-8 설정(윈도우)
 #ifdef _WIN32
     SetConsoleOutputCP(949);
     SetConsoleCP(949);
@@ -594,6 +649,17 @@ int main(int num, char* values[])
         cout << "[경고] 로그 파일(scanner.log) 열기 실패이외다." << endl;
     else
         Log("[INFORMATION]", "프로그램 시작일세");
+
+    // 어떤 경로로 return 하든 반드시 종료 로그 + flush/close를 보장
+    auto _scope = MakeScopeGuard([&]()
+        {
+            Log("[INFORMATION]", "프로그램을 종료하겠소이다");
+            if (g_log.is_open())
+            {
+                g_log.flush();
+                g_log.close();
+            }
+        });
 
     // values 파싱(--out / 스캔경로)
     CliOptions opt = ParseArgs(num, values);
@@ -651,7 +717,6 @@ int main(int num, char* values[])
     // 요약 출력
     PrintSummary(st, filtered.size());
 
-    Log("[INFORMATION]", "프로그램을 종료하겠소이다");
     return 0;
 }
 
