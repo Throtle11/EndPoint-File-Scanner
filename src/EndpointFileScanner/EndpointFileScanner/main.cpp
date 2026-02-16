@@ -63,7 +63,7 @@ static std::wstring Utf8ToWide(const std::string& s)
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], len);
     return w;
 }
-
+//윈도우콘솔에 유니코드 출력
 static void ConsoleWriteWide(const std::wstring& w)
 {
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -74,7 +74,7 @@ static void ConsoleWriteWide(const std::wstring& w)
         cout << s;
         return;
     }
-
+    //콘솔인지 확인
     DWORD mode = 0;
     if (!GetConsoleMode(h, &mode))
     {
@@ -83,12 +83,18 @@ static void ConsoleWriteWide(const std::wstring& w)
         cout << s;
         return;
     }
-
+    //문자열을 콘솔에 출력
+    //요청한 글자수와 실제 출력된 글자수가 달랐을경우 에러메시지 출력
     DWORD written = 0;
-    WriteConsoleW(h, w.c_str(), (DWORD)w.size(), &written, nullptr);
+    if (!WriteConsoleW(h, w.c_str(), (DWORD)w.size(), &written, nullptr)) {
+        cout << "[에러] 콘솔 출력을 실패했소" << endl;
+    }
+    else if (written != (DWORD)w.size()) {
+        cout << "일부 글자만 출력되었소" << endl;
+    }
 }
 
-// 유니코드(UTF-16) 문자 단위로 가운데 축약하여 문자열 손상 방지
+// 유니코드(UTF-16)를 문자 단위로 축약하여 문자열 손상 방지
 static std::wstring TruncateMiddleW(const std::wstring& s, std::size_t maxLen)
 {
     if (s.size() <= maxLen) return s;
@@ -143,7 +149,7 @@ struct CliOptions
     std::string outPath;  // --out으로 받은 CSV 경로(없으면 빈 문자열)
 };
 
-//문자열을 소문자로 변환후 돌려줌
+//문자열을 소문자로 변환
 static std::string ToLower(std::string s)
 {
     for (char& c : s)
@@ -436,7 +442,6 @@ static std::vector<FileEntry> FilterEntries(const std::vector<FileEntry>& entrie
         if (reject)
         {
             ++st.skipped; // 필터로 제외된 것 스킵
-            // (원한다면 여기서도 로그 가능하나, 로그가 너무 많아질 수 있어 기본은 생략)
             continue;
         }
 
