@@ -204,7 +204,7 @@ static std::wstring Utf8ToWide(const std::string& s)
 static void ConsoleWriteWide(const std::wstring& w)
 {
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (h == INVALID_HANDLE_VALUE || h == nullptr)
+    if (h == INVALID_HANDLE_VALUE || h == nullptr)//핸들 유효성검사
     {
         // 콘솔 핸들이 아니면 fallback
         std::string s(w.begin(), w.end());
@@ -216,7 +216,7 @@ static void ConsoleWriteWide(const std::wstring& w)
     DWORD mode = 0;
     if (!GetConsoleMode(h, &mode))
     {
-        // 리디렉션/파일 등 콘솔이 아니면 fallback
+		// 콘솔이 아닌 파일/리디렉션이면 fallback
         std::string s(w.begin(), w.end());
         cout << s;
         return;
@@ -467,7 +467,7 @@ static std::vector<FileEntry> FilterEntries(const std::vector<FileEntry>& entrie
     Stats& st)
 {
     std::vector<FileEntry> out;
-    out.reserve(entries.size());
+    out.reserve(entries.size());//입력으로 받은 개수만큼 메모리확보
 
     for (const auto& e : entries)
     {
@@ -500,19 +500,6 @@ static std::vector<FileEntry> FilterEntries(const std::vector<FileEntry>& entrie
 
 
 //============================= 콘솔 표 출력 =============================
-
-static std::string TruncateMiddle(const std::string& s, std::size_t maxLen)
-{
-    if (s.size() <= maxLen) return s;
-    if (maxLen <= 3) return s.substr(0, maxLen);
-    //남겨둘 문자수
-    std::size_t keep = maxLen - 3;
-    std::size_t head = keep / 2;
-    std::size_t tail = keep - head;
-
-    return s.substr(0, head) + "..." + s.substr(s.size() - tail);
-}
-
 static void PrintTableHeader()
 {
     cout << "=== 결과(미리보기) ===" << endl;
