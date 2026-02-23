@@ -20,6 +20,12 @@
 #include <chrono>
 #include <ctime>
 #include <utility>
+//워커풀 관련 헤더 
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <atomic>
 
 
 namespace fs = std::filesystem;
@@ -47,7 +53,7 @@ struct Stats
     std::size_t skipped = 0;//제외된 항목수(오류/필터 제외 포함)
 
     std::size_t data_ok = 0;//데이터수집이 완료된 항목수
-    std::size_t data_fail = 0;//데이터수집에 실패한항목수
+    std::size_t data_fail = 0;//데이터수집에 실패한 항목수
 };
 
 // 실행 옵션(스캔 경로, CSV 저장 경로)을 담는 구조체
@@ -123,7 +129,8 @@ private:
     bool active_;
 public:
     explicit ScopeGuard(F f) : func_(std::move(f)), active_(true) {}
-    ~ScopeGuard() { if (active_) func_(); }
+    ~ScopeGuard() { 
+        if (active_ == true) func_(); }
 
     ScopeGuard(const ScopeGuard&) = delete;
     ScopeGuard& operator=(const ScopeGuard&) = delete;
@@ -143,10 +150,51 @@ static ScopeGuard<F> MakeScopeGuard(F f)
     return ScopeGuard<F>(std::move(f));
 }
 
+//작업 큐
+class TaskQueue
+{
+    std::mutex mm;
+    std::condition_variable cv_;
+    std::deque<fs::path> qq;
+    bool closed_ = false;
+
+public:
+    void Push(fs::path p)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mm);
+            qq.push_back(std::move(p));
+        }
+        cv_.notify_one();
+    }
+
+    // 성공적으로 꺼내면 true, 더 이상 일이 없으면 false
+    bool Pop(fs::path& out)
+    {
+        std::unique_lock<std::mutex> lock(mm);
+        cv_.wait(lock, [&] { return closed_ || !qq.empty(); });
+
+        if (qq.empty()) return false; // closed_ && empty
+        out = std::move(qq.front());
+        qq.pop_front();
+        return true;
+    }
+
+    void Close()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mm);
+            closed_ = true;
+        }
+        cv_.notify_all();
+    }
+};
+
 
 //============================= 로그출력 =============================
 
 static std::ofstream g_log;
+static std::mutex g_log_mtx;
 
 static std::string NowString()
 {
@@ -159,7 +207,7 @@ static std::string NowString()
 #ifdef _WIN32
     //윈도우
     localtime_s(&time, &tt);
-#else
+#else   
     //유닉스,리눅스
     localtime_r(&time, &tt);
 #endif
@@ -172,6 +220,8 @@ static std::string NowString()
 //콘솔,파일에 로그출력
 static void Log(const std::string& level, const std::string& msg)
 {
+
+    std::lock_guard<std::mutex> lock(g_log_mtx);
     std::string line = "[" + NowString() + "][" + level + "] " + msg;
 
     // 콘솔
@@ -269,7 +319,7 @@ static CliOptions ParseArgs(int argc, char* argv[])
             else
             {
                 cout << "[오류] --out 뒤에 파일 경로가 필요하외다." << endl;
-                Log("[에러]", "--out 뒤에 파일 경로가 없구먼");
+                Log("ERROR", "--out 뒤에 파일 경로가 없구먼");
             }
             continue;
         }
@@ -323,7 +373,7 @@ static std::string GetPathFromArgsOrInput(int num, char* values[], CliOptions& o
             else
             {
                 cout << "[오류] --out 뒤에 파일 경로를 입력하시게나:" << endl;
-                Log("[에러]", "--out 뒤에 파일 경로가 없구먼");
+                Log("ERROR", "--out 뒤에 파일 경로가 없구먼");
             }
         }
     }
@@ -338,7 +388,7 @@ static bool ValidatePath(const std::string& path)
 
     if (path.empty()) {
         cout << "[오류] 경로가 비어있는게로구먼." << endl;
-        Log("[에러]", "경로가 비어있구먼");
+        Log("ERROR", "경로가 비어있구먼");
         return false;
     }
 
@@ -349,7 +399,7 @@ static bool ValidatePath(const std::string& path)
         if (ec) cout << " (" << ec.message() << ")";
         cout << endl;
 
-        Log("[에러]", "경로 접근/확인 실패일세: " + path + (ec ? (" (" + ec.message() + ")") : ""));
+        Log("ERROR", "경로 접근/확인 실패일세: " + path + (ec ? (" (" + ec.message() + ")") : ""));
         return false;
     }
 
@@ -360,7 +410,7 @@ static bool ValidatePath(const std::string& path)
         if (ec) cout << " (" << ec.message() << ")";
         cout << endl;
 
-        Log("[에러]", "폴더 아님/확인 실패일세: " + path + (ec ? (" (" + ec.message() + ")") : ""));
+        Log("ERROR", "폴더 아님/확인 실패일세: " + path + (ec ? (" (" + ec.message() + ")") : ""));
         return false;
     }
 
@@ -382,7 +432,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
 
     if (ec) {
         cout << "[오류] 디렉터리 순환 시작 실패일세: " << ec.message() << endl;
-        Log("[에러]", "디렉터리 순환 시작 실패일세: " + root.u8string() + " (" + ec.message() + ")");
+        Log("ERROR", "디렉터리 순환 시작 실패일세: " + root.u8string() + " (" + ec.message() + ")");
         return entries;
     }
 
@@ -393,7 +443,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
         // 순회중 오류가 있다면 스킵하고 계속
         if (ec) {
             ++st.skipped;
-            Log("[WARNING]", "순회 중 오류로 스킵하겠소: (" + ec.message() + ")");
+            Log("WARNING", "순회 중 오류로 스킵하겠소: (" + ec.message() + ")");
             ec.clear();
             continue;
         }
@@ -418,7 +468,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
             if (mec) {
                 ++st.data_fail;
                 ++st.skipped;
-                Log("[WARNING]", "file_size 실패로 스킵하겠소: " + fe.path.u8string() + " (" + mec.message() + ")");
+                Log("WARNING", "file_size 실패로 스킵하겠소: " + fe.path.u8string() + " (" + mec.message() + ")");
                 continue;
             }
 
@@ -426,7 +476,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
             if (mec) {
                 ++st.data_fail;
                 ++st.skipped;
-                Log("[WARNING]", "last_write_time 실패로 스킵하겠소: " + fe.path.u8string() + " (" + mec.message() + ")");
+                Log("WARNING", "last_write_time 실패로 스킵하겠소: " + fe.path.u8string() + " (" + mec.message() + ")");
                 continue;
             }
 
@@ -443,7 +493,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
             else if (dec)
             {
                 ++st.skipped;
-                Log("[WARNING]", "디렉터리 판정 실패로 스킵하겠소: " + entry.path().u8string() + " (" + dec.message() + ")");
+                Log("WARNING", "디렉터리 판정 실패로 스킵하겠소: " + entry.path().u8string() + " (" + dec.message() + ")");
             }
 
             // 폴더가 아니면 통과
@@ -453,11 +503,147 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
         {
             // 파일 판정 자체가 실패한 경우 스킵
             ++st.skipped;
-            Log("[WARNING]", "정규 파일 판정 실패로 스킵하겠소: " + entry.path().u8string() + " (" + iec.message() + ")");
+            Log("WARNING", "정규 파일 판정 실패로 스킵하겠소: " + entry.path().u8string() + " (" + iec.message() + ")");
         }
         // 정규 파일이 아닌 항목(폴더/링크 등)은 통과
     }
+    return entries;
+}
 
+//병렬 스캔
+static std::vector<FileEntry> ScanDirectoryParallel(const fs::path& root, Stats& st, unsigned threadCount)
+{
+    if (threadCount == 0)
+    {
+        threadCount = std::thread::hardware_concurrency();
+        if (threadCount == 0) threadCount = 4;
+    }
+    if (threadCount > 16) threadCount = 16; // 과도한 스레드 방지(초기값)
+
+    TaskQueue tq;
+
+    // 여러 스레드가 동시에 안전하게 카운트
+    std::atomic_size_t total{ 0 }, files_seen{ 0 }, dirs{ 0 }, skipped{ 0 }, data_ok{ 0 }, data_fail{ 0 };
+
+    //워커별 벡터에 저장
+    std::vector<std::vector<FileEntry>> locals(threadCount);
+
+    auto worker = [&](unsigned idx)
+        {
+            fs::path p;
+            auto& local = locals[idx];
+            local.reserve(1024);
+
+            while (tq.Pop(p))
+            {
+                FileEntry fe;
+                fe.path = p;
+                fe.ext = ToLower(fe.path.extension().string());
+
+                std::error_code ec;
+
+                fe.size = fs::file_size(p, ec);
+                if (ec)
+                {
+                    data_fail.fetch_add(1);
+                    skipped.fetch_add(1);
+                    Log("WARNING", "file_size 실패로 스킵하겠소: " + p.u8string() + " (" + ec.message() + ")");
+                    continue;
+                }
+
+                fe.mtime = fs::last_write_time(p, ec);
+                if (ec)
+                {
+                    data_fail.fetch_add(1);
+                    skipped.fetch_add(1);
+                    Log("WARNING", "last_write_time 실패로 스킵하겠소: " + p.u8string() + " (" + ec.message() + ")");
+                    continue;
+                }
+
+                data_ok.fetch_add(1);
+                local.push_back(std::move(fe));
+            }
+        };
+
+    // treadCount 개수만큼 worker 함수를 실행하는 스레드 생성
+    std::vector<std::thread> workers;
+    workers.reserve(threadCount);
+    for (unsigned i = 0; i < threadCount; ++i)
+        workers.emplace_back(worker, i);
+
+    // Producer: 폴더 순회하며 파일 경로만 큐에 넣음
+    std::error_code ec;
+    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
+    fs::recursive_directory_iterator end;
+
+    if (ec)
+    {
+        Log("ERROR", "디렉터리 순환 시작 실패일세: " + root.u8string() + " (" + ec.message() + ")");
+        tq.Close();
+        for (auto& t : workers) t.join();
+        return {};
+    }
+
+    for (; it != end; it.increment(ec))
+    {
+        total.fetch_add(1);
+
+        if (ec)
+        {
+            skipped.fetch_add(1);
+            Log("WARNING", "순회 중 오류로 스킵하겠소: (" + ec.message() + ")");
+            ec.clear();
+            continue;
+        }
+
+        const fs::directory_entry& entry = *it;
+
+        std::error_code iec;
+        if (entry.is_regular_file(iec))
+        {
+            files_seen.fetch_add(1);
+            tq.Push(entry.path());
+        }
+        else if (!iec)
+        {
+            std::error_code dec;
+            if (entry.is_directory(dec) && !dec) dirs.fetch_add(1);
+            else if (dec)
+            {
+                skipped.fetch_add(1);
+                Log("WARNING", "디렉터리 판정 실패로 스킵하겠소: " + entry.path().u8string() + " (" + dec.message() + ")");
+            }
+        }
+        else
+        {
+            skipped.fetch_add(1);
+            Log("WARNING", "정규 파일 판정 실패로 스킵하겠소: " + entry.path().u8string() + " (" + iec.message() + ")");
+        }
+    }
+
+    // 작업큐 닫기
+    tq.Close();
+
+    // 스레드정리,모든 워커 종료대기
+    for (auto& t : workers) t.join();
+
+    // 워커별 결과 합치기
+    std::vector<FileEntry> entries;
+    size_t totalOK = 0;
+    for (auto& v : locals) totalOK += v.size();
+    entries.reserve(totalOK);
+    for (auto& v : locals)
+        for (auto& e : v)
+            entries.push_back(std::move(e));
+
+    // Stats 반영
+    st.total = total.load();
+    st.files = files_seen.load();
+    st.dirs = dirs.load();
+    st.skipped = skipped.load();
+    st.data_ok = data_ok.load();
+    st.data_fail = data_fail.load();
+    Log("INFORMATION", "병렬 스캔 완료일세: 스레드=" + std::to_string(threadCount));
     return entries;
 }
 
@@ -548,11 +734,10 @@ static void PrintEntriesTable(std::vector<FileEntry> entries, std::size_t topN)
 
 //============================= CSV 저장 =============================
 
-// CSV 출력
+// CSV 형식으로 안전하게 문자열 변환
 static std::string EscapeCsv(const std::string& s)
-
-//따옴표검사
 {
+    // 따옴표 검사
     bool needQuote = false;
     for (char c : s)
     {
@@ -562,18 +747,24 @@ static std::string EscapeCsv(const std::string& s)
             break;
         }
     }
-    if (!needQuote) return s;
-
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('"');
-    for (char c : s)
+    if (needQuote==true)
     {
-        if (c == '"') out += "\"\"";
-        else out.push_back(c);
+        std::string out;
+        out.reserve(s.size() + 2);
+        out.push_back('"');
+
+        for (char c : s)
+        {
+            if (c == '"') out += "\"\"";
+            else out.push_back(c);
+        }
+        out.push_back('"');
+        return out;
     }
-    out.push_back('"');
-    return out;
+    else
+    {
+        return s;
+    }
 }
 
 // entries를 CSV로 저장
@@ -586,9 +777,9 @@ static bool WriteCsv(const std::string& outPath, const std::vector<FileEntry>& e
         fs::create_directories(p.parent_path(), ec);
 
     //파일에 쓰기
-    std::ofstream ofs(outPath, std::ios::binary);
+    std::ofstream ofs(outPath, std::ios::binary);   
     if (!ofs) {
-        Log("[에러]", "CSV 파일 열기 실패: " + outPath);
+        Log("ERROR", "CSV 파일 열기 실패: " + outPath);
         return false;
     }
 
@@ -633,14 +824,14 @@ int main(int num, char* values[])
     //로그 파일 열기
     g_log.open("scanner.log", std::ios::app);
     if (!g_log.is_open())
-        cout << "[경고] 로그 파일(scanner.log) 열기 실패이외다." << endl;
+        cout << "[오류] 로그 파일(scanner.log) 열기 실패이외다." << endl;
     else
-        Log("[INFORMATION]", "프로그램 시작일세");
+        Log("INFORMATION", "프로그램 시작일세");
 
     // 어떤 경로로 return 하든 반드시 종료 로그 + flush/close를 보장
     auto _scope = MakeScopeGuard([&]()
         {
-            Log("[INFORMATION]", "프로그램을 종료하겠소이다");
+            Log("INFORMATION", "프로그램을 종료하겠소이다");
             if (g_log.is_open())
             {
                 g_log.flush();
@@ -658,11 +849,12 @@ int main(int num, char* values[])
     if (!ValidatePath(path))
         return 1;
 
-    Log("[INFORMATION]", "스캔을 시작하겠네: " + path);
+    Log("INFORMATION", "스캔을 시작하겠네: " + path);
 
     // 스캔 + 데이터 수집
     Stats st;
-    auto entries = ScanDirectory(path, st);
+    unsigned threads = 0; // 일단 자동(추후 --threads 옵션으로 받게 할 수 있음)
+    auto entries = ScanDirectoryParallel(path, st, threads);
 
     // 크기필터 설정(프로토타입 필터값)
     FilterConfig cfg;
@@ -693,12 +885,12 @@ int main(int num, char* values[])
     if (!WriteCsv(outPath, filtered))
     {
         cout << "\n[오류] CSV 저장 실패이외다: " << outPath << endl;
-        Log("[에러]", "CSV 저장 실패일세: " + outPath);
+        Log("ERROR", "CSV 저장 실패일세: " + outPath);
     }
     else
     {
         cout << "\n[완료] CSV 저장 완료이외다: " << outPath << endl;
-        Log("[INFORMATION]", "CSV 저장 완료일세: " + outPath);
+        Log("INFORMATION", "CSV 저장 완료일세: " + outPath);
     }
 
     // 요약 출력
