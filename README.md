@@ -47,3 +47,10 @@ Windows 환경에서 폴더를 스캔하여 파일 정보를 수집하고 필터
 - `CSV 저장 경로를 입력하시게나:` 라는 문구 뒤에 CSV 파일로 저장할 경로와 CSV파일명을 입력하면 리포트가 저장됩니다.(예시: `C:\Users\User\OneDrive\Desktop\aaa.csv`)
 - 경로를 입력하지 않고 엔터키를 누르면 기본적으로 `C:\src\EndpointFileScanner\EndpointFileScanner`경로에 `report.csv` 라는 이름으로 저장됩니다.
 - 스캔경로와 저장로를 같이 입력할 수도 있습니다. (예시: `"C:\Users\User\OneDrive\Desktop\C언어" --out aaa.csv`)
+
+# 성능(벤치마크)
+- 대상: C:\Users\User\OneDrive\Desktop\C언어 / Release / 동일 조건에서 threads만 변경
+| threads | time(ms) | files | skipped |
+| 1 | ms=172 | files=460 | skipped=0 |
+| 4 | ms=111 | files=460 | skipped=0 |
+| 8 | ms=106 | files=460 | skipped=0 |

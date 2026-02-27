@@ -511,7 +511,7 @@ static std::vector<FileEntry> ScanDirectory(const fs::path& root, Stats& st)
 }
 
 //병렬 스캔
-static std::vector<FileEntry> ScanDirectoryParallel(const fs::path& root, Stats& st, unsigned threadCount)
+static std::vector<FileEntry> ScanDirectoryParallel(const fs::path& root, Stats& st, unsigned& threadCount)
 {
     if (threadCount == 0)
     {
@@ -783,7 +783,7 @@ static bool WriteCsv(const std::string& outPath, const std::vector<FileEntry>& e
         return false;
     }
 
-    ofs << "\xEF\xBB\xBF"; //csv파일 한글깨짐 방지 =
+    ofs << "\xEF\xBB\xBF";//csv파일 한글깨짐 방지
     ofs << "Path,Size,Ext" << endl;
     for (const auto& e : entries)
     {
@@ -854,8 +854,19 @@ int main(int num, char* values[])
 
     // 스캔 + 데이터 수집
     Stats st;
-    unsigned threads = 0; // 일단 자동(추후 --threads 옵션으로 받게 할 수 있음)
+    unsigned threads = 0; // 0일때는 자동,벤치마크를 원할때는 스레드 수를 직접 조정
+    auto t0 = std::chrono::steady_clock::now();
+
     auto entries = ScanDirectoryParallel(path, st, threads);
+
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+    Log("INFORMATION",
+        "벤치마크: threads=" + std::to_string(threads) +
+        ", ms=" + std::to_string(ms) +
+        ", files=" + std::to_string(st.files) +
+        ", skipped=" + std::to_string(st.skipped));
 
     // 크기필터 설정(프로토타입 필터값)
     FilterConfig cfg;
