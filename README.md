@@ -1,6 +1,6 @@
 # C++ 엔드포인트 파일 스캐너 
 
-Windows 환경에서 폴더를 스캔하여 파일 정보를 수집하고 필터링 후 리포트(CSV/JSON)로 저장하는 C++ 프로젝트입니다.
+Windows 환경에서 폴더를 스캔하여 파일 정보를 수집하고 필터링 후 리포트(CSV)로 저장하는 C++ 프로젝트입니다.
 
 # 목표
 - 엔드포인트 보안 에이전트의 파일 스캔 단계별(정보수집-필터링-리포트저장) 감각 익히기
@@ -35,3 +35,15 @@ Windows 환경에서 폴더를 스캔하여 파일 정보를 수집하고 필터
 - v1.2 코드 정리 및 스코프가드 추가
 - v1.3 불필요한 함수 (TruncateMiddle 함수) 제거
 - v1.4 멀티스레드 스캔 기능 추가(워커 풀)
+- v1.5 CSV 한글 깨짐 현상 수정
+
+# 빌드방법
+- `src/EndpointFileScanner/EndpointFileScanner.sln` 를 Visual Studio 2022로 열고
+- 빌드 구성을 `Release`(권장) 또는 `Debug`를 선택후 F5 키로 실행합니다.
+
+# 실행
+- 스캔 예시:` C:\Users\User\OneDrive\Desktop` 입력후 엔터키를 누르면 해당 폴더가 스캔됩니다.
+- 스캔이 완료되면 콘솔에 결과가 출력됩니다.
+- `CSV 저장 경로를 입력하시게나:` 라는 문구 뒤에 CSV 파일로 저장할 경로와 CSV파일명을 입력하면 리포트가 저장됩니다.(예시: `C:\Users\User\OneDrive\Desktop\aaa.csv`)
+- 경로를 입력하지 않고 엔터키를 누르면 기본적으로 `C:\src\EndpointFileScanner\EndpointFileScanner`경로에 `report.csv` 라는 이름으로 저장됩니다.
+- 스캔경로와 저장로를 같이 입력할 수도 있습니다. (예시: `"C:\Users\User\OneDrive\Desktop\C언어" --out aaa.csv`)
