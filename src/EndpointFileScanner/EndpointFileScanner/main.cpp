@@ -783,6 +783,7 @@ static bool WriteCsv(const std::string& outPath, const std::vector<FileEntry>& e
         return false;
     }
 
+    ofs << "\xEF\xBB\xBF"; //csv파일 한글깨짐 방지 =
     ofs << "Path,Size,Ext" << endl;
     for (const auto& e : entries)
     {
