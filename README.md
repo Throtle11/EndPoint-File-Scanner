@@ -49,8 +49,12 @@ Windows 환경에서 폴더를 스캔하여 파일 정보를 수집하고 필터
 - 스캔경로와 저장로를 같이 입력할 수도 있습니다. (예시: `"C:\Users\User\OneDrive\Desktop\C언어" --out aaa.csv`)
 
 # 성능(벤치마크)
-- 대상: C:\Users\User\OneDrive\Desktop\C언어 / Release / 동일 조건에서 threads만 변경
-| threads | time(ms) | files | skipped |
-| 1 | ms=172 | files=460 | skipped=0 |
-| 4 | ms=111 | files=460 | skipped=0 |
-| 8 | ms=106 | files=460 | skipped=0 |
+
+- 대상: `C:\Users\User\OneDrive\Desktop\C언어` (Release)
+- 동일 조건에서 threads만 변경
+
+| threads | time (ms) | files | skipped |
+|-------:|----------:|------:|--------:|
+| 1      | 172       | 460   | 0       |
+| 4      | 111       | 460   | 0       |
+| 8      | 106       | 460   | 0       |
