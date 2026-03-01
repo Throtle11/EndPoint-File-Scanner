@@ -36,7 +36,7 @@ Windows 환경에서 폴더를 스캔하여 파일 정보를 수집하고 필터
 - v1.3 불필요한 함수 (TruncateMiddle 함수) 제거
 - v1.4 멀티스레드 스캔 기능 추가(워커 풀)
 - v1.5 CSV 한글 깨짐 현상 수정
-
+- v1.5.1 벤치마크 리드미,C++표준언어 수정(C++17)
 # 빌드방법
 - `src/EndpointFileScanner/EndpointFileScanner.sln` 를 Visual Studio 2022로 열고
 - 빌드 구성을 `Release`(권장) 또는 `Debug`를 선택후 F5 키로 실행합니다.
