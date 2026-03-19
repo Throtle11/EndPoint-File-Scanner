@@ -815,7 +815,7 @@ static void PrintSummary(const Stats& st, std::size_t filteredCount)
 
 int main(int num, char* values[])
 {
-    //문자깨짐현상으로 인한 콘솔 UTF-8 설정(윈도우)
+//콘솔 한글 깨짐 방지
 #ifdef _WIN32
     SetConsoleOutputCP(949);
     SetConsoleCP(949);
